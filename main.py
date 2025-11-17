@@ -9,13 +9,20 @@ from typing import Dict, List, Tuple, Optional
 import asyncio
 import aiofiles
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "expenses.db")
-CATEGORIES_FILE = os.path.join(os.path.dirname(__file__), "categories.json")
+# Use absolute paths for production
+DB_PATH = "/data/expenses.db"  # Persistent storage in production
+CATEGORIES_FILE = "/data/categories.json"  # Persistent storage
 
 mcp = FastMCP("ExpenseTracker")
 
+def ensure_data_directory():
+    """Ensure the data directory exists."""
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(CATEGORIES_FILE), exist_ok=True)
+
 def load_categories() -> Dict:
     """Load categories and subcategories from JSON file synchronously."""
+    ensure_data_directory()  # Ensure directory exists
     try:
         with open(CATEGORIES_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -42,23 +49,28 @@ def load_categories() -> Dict:
         return default_data["categories"]
     except Exception as e:
         print(f"Error loading categories: {e}")
-        return {}
+        # Return default categories if file operations fail
+        return default_data["categories"]
 
 def init_db():
     """Initialize the database synchronously."""
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS expenses(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT NOT NULL,
-                amount REAL NOT NULL,
-                category TEXT NOT NULL,
-                subcategory TEXT DEFAULT "",
-                note TEXT DEFAULT "",
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
+    ensure_data_directory()  # Ensure directory exists
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS expenses(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    category TEXT NOT NULL,
+                    subcategory TEXT DEFAULT "",
+                    note TEXT DEFAULT "",
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+    except Exception as e:
+        print(f"Error initializing database: {e}")
 
 # Initialize database and categories synchronously
 init_db()
@@ -155,6 +167,9 @@ class CategoryManager:
 
     def auto_detect_category(self, note: str) -> Tuple[str, str]:
         """Auto-detect category and subcategory based on note content."""
+        if not note:
+            return "Other", "Miscellaneous"
+            
         note_lower = note.lower()
         # Check for exact subcategory matches first
         for subcat_lower, category in self.subcategory_mapping.items():
@@ -172,6 +187,9 @@ class CategoryManager:
     def suggest_categories(self, note: str) -> List[Tuple[str, str]]:
         """Suggest possible categories and subcategories based on note."""
         suggestions = []
+        if not note:
+            return [("Other", "Miscellaneous")]
+            
         note_lower = note.lower()
         for category, data in self.categories.items():
             subcategories = data.get("subcategories", [])
@@ -260,15 +278,18 @@ async def get_categories():
 @mcp.tool()
 async def list_expenses(limit: int = 100, offset: int = 0):
     '''List all expenses with pagination.'''
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
-            (limit, offset)
-        ) as cursor:
-            cols = [description[0] for description in cursor.description]
-            rows = await cursor.fetchall()
-            expenses = [dict(zip(cols, row)) for row in rows]
-            return expenses
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses ORDER BY date DESC, id DESC LIMIT ? OFFSET ?",
+                (limit, offset)
+            ) as cursor:
+                cols = [description[0] for description in cursor.description]
+                rows = await cursor.fetchall()
+                expenses = [dict(zip(cols, row)) for row in rows]
+                return expenses
+    except Exception as e:
+        return {'status': 'error', 'message': f'Failed to list expenses: {str(e)}'}
 
 @mcp.tool()
 async def update_expense(expense_id: int, date: str = None, amount: float = None, category: str = None, subcategory: str = None, note: str = None):
@@ -345,112 +366,133 @@ async def delete_expense(expense_id: int):
 @mcp.tool()
 async def get_expense_by_id(expense_id: int):
     '''Get a specific expense by ID.'''
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses WHERE id = ?",
-            (expense_id,)
-        ) as cursor:
-            cols = [description[0] for description in cursor.description]
-            row = await cursor.fetchone()
-            if row:
-                return dict(zip(cols, row))
-            else:
-                return {'status': "error", "message": "Expense not found"}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses WHERE id = ?",
+                (expense_id,)
+            ) as cursor:
+                cols = [description[0] for description in cursor.description]
+                row = await cursor.fetchone()
+                if row:
+                    return dict(zip(cols, row))
+                else:
+                    return {'status': "error", "message": "Expense not found"}
+    except Exception as e:
+        return {'status': "error", "message": f"Failed to get expense: {str(e)}"}
 
 @mcp.tool()
 async def get_expenses_by_category(category: str):
     '''Get all expenses for a specific category.'''
-    if not category_manager.validate_category(category):
-        return {'status': "error", "message": f"Invalid category '{category}'"}
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses WHERE category = ? ORDER BY date DESC",
-            (category,)
-        ) as cursor:
-            cols = [description[0] for description in cursor.description]
-            rows = await cursor.fetchall()
-            expenses = [dict(zip(cols, row)) for row in rows]
-            return expenses
+    try:
+        if not category_manager.validate_category(category):
+            return {'status': "error", "message": f"Invalid category '{category}'"}
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses WHERE category = ? ORDER BY date DESC",
+                (category,)
+            ) as cursor:
+                cols = [description[0] for description in cursor.description]
+                rows = await cursor.fetchall()
+                expenses = [dict(zip(cols, row)) for row in rows]
+                return expenses
+    except Exception as e:
+        return {'status': "error", "message": f"Failed to get expenses by category: {str(e)}"}
 
 @mcp.tool()
 async def get_expenses_by_date_range(start_date: str, end_date: str):
     '''Get expenses within a date range (inclusive).'''
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses WHERE date BETWEEN ? AND ? ORDER BY date DESC",
-            (start_date, end_date)
-        ) as cursor:
-            cols = [description[0] for description in cursor.description]
-            rows = await cursor.fetchall()
-            expenses = [dict(zip(cols, row)) for row in rows]
-            return expenses
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses WHERE date BETWEEN ? AND ? ORDER BY date DESC",
+                (start_date, end_date)
+            ) as cursor:
+                cols = [description[0] for description in cursor.description]
+                rows = await cursor.fetchall()
+                expenses = [dict(zip(cols, row)) for row in rows]
+                return expenses
+    except Exception as e:
+        return {'status': "error", "message": f"Failed to get expenses by date range: {str(e)}"}
 
 @mcp.tool()
 async def get_expense_summary(period: str = "month"):
     '''Get expense summary by period (month, week, year).'''
-    async with aiosqlite.connect(DB_PATH) as db:
-        if period == "month":
-            query = """
-                SELECT strftime('%Y-%m', date) as period,
-                       category,
-                       SUM(amount) as total
-                FROM expenses
-                GROUP BY period, category
-                ORDER BY period DESC, total DESC
-            """
-        elif period == "week":
-            query = """
-                SELECT strftime('%Y-%W', date) as period,
-                       category,
-                       SUM(amount) as total
-                FROM expenses
-                GROUP BY period, category
-                ORDER BY period DESC, total DESC
-            """
-        elif period == "year":
-            query = """
-                SELECT strftime('%Y', date) as period,
-                       category,
-                       SUM(amount) as total
-                FROM expenses
-                GROUP BY period, category
-                ORDER BY period DESC, total DESC
-            """
-        else:
-            return {'status': "error", "message": "Invalid period. Use 'month', 'week', or 'year'"}
-        async with db.execute(query) as cursor:
-            cols = [description[0] for description in cursor.description]
-            rows = await cursor.fetchall()
-            summary = [dict(zip(cols, row)) for row in rows]
-            return summary
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            if period == "month":
+                query = """
+                    SELECT strftime('%Y-%m', date) as period,
+                           category,
+                           SUM(amount) as total
+                    FROM expenses
+                    GROUP BY period, category
+                    ORDER BY period DESC, total DESC
+                """
+            elif period == "week":
+                query = """
+                    SELECT strftime('%Y-%W', date) as period,
+                           category,
+                           SUM(amount) as total
+                    FROM expenses
+                    GROUP BY period, category
+                    ORDER BY period DESC, total DESC
+                """
+            elif period == "year":
+                query = """
+                    SELECT strftime('%Y', date) as period,
+                           category,
+                           SUM(amount) as total
+                    FROM expenses
+                    GROUP BY period, category
+                    ORDER BY period DESC, total DESC
+                """
+            else:
+                return {'status': "error", "message": "Invalid period. Use 'month', 'week', or 'year'"}
+            async with db.execute(query) as cursor:
+                cols = [description[0] for description in cursor.description]
+                rows = await cursor.fetchall()
+                summary = [dict(zip(cols, row)) for row in rows]
+                return summary
+    except Exception as e:
+        return {'status': "error", "message": f"Failed to get expense summary: {str(e)}"}
 
 @mcp.tool()
 async def get_total_spending():
     '''Get total spending across all expenses (excluding Income).'''
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT SUM(CASE WHEN category != 'Income' THEN amount ELSE 0 END) as total_spent FROM expenses") as cursor:
-            row = await cursor.fetchone()
-            return {'total_spent': row[0] if row[0] is not None else 0}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT SUM(CASE WHEN category != 'Income' THEN amount ELSE 0 END) as total_spent FROM expenses") as cursor:
+                row = await cursor.fetchone()
+                return {'total_spent': row[0] if row[0] is not None else 0}
+    except Exception as e:
+        return {'status': "error", "message": f"Failed to get total spending: {str(e)}"}
 
 @mcp.tool()
 async def search_expenses(query: str):
     '''Search expenses by note or category.'''
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses WHERE note LIKE ? OR category LIKE ? ORDER BY date DESC",
-            (f'%{query}%', f'%{query}%')
-        ) as cursor:
-            cols = [description[0] for description in cursor.description]
-            rows = await cursor.fetchall()
-            expenses = [dict(zip(cols, row)) for row in rows]
-            return expenses
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses WHERE note LIKE ? OR category LIKE ? ORDER BY date DESC",
+                (f'%{query}%', f'%{query}%')
+            ) as cursor:
+                cols = [description[0] for description in cursor.description]
+                rows = await cursor.fetchall()
+                expenses = [dict(zip(cols, row)) for row in rows]
+                return expenses
+    except Exception as e:
+        return {'status': "error", "message": f"Failed to search expenses: {str(e)}"}
 
 @mcp.tool()
 async def get_recent_expenses(days: int = 7):
     '''Get expenses from the last N days.'''
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-    return await get_expenses_by_date_range(start_date, end_date)
+    try:
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        return await get_expenses_by_date_range(start_date, end_date)
+    except Exception as e:
+        return {'status': "error", "message": f"Failed to get recent expenses: {str(e)}"}
 
 @mcp.tool()
 async def export_expenses(format_type: str = 'json'):
@@ -470,5 +512,5 @@ async def export_expenses(format_type: str = 'json'):
     except Exception as e:
         return {'status': 'error', 'message': f'Export failed: {str(e)}'}
 
-if __name__ == "__main__":
-    mcp.run(transport="http", host="0.0.0.0", port=8000)
+# Remove the __main__ block for production deployment
+# FastMCP Cloud will handle the server startup
