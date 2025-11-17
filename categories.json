@@ -1,0 +1,24 @@
+{
+  "categories": {
+    "Food & Dining": {
+      "subcategories": [
+        "Groceries",
+        "Restaurants",
+        "Takeout",
+        "Coffee"
+      ]
+    },
+    "Transportation": {
+      "subcategories": [
+        "Fuel",
+        "Public Transport",
+        "Taxi"
+      ]
+    },
+    "Other": {
+      "subcategories": [
+        "Miscellaneous"
+      ]
+    }
+  }
+}
