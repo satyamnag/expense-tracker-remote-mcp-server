@@ -1,5 +1,6 @@
 from fastmcp import FastMCP
 import os
+import sqlite3
 import aiosqlite
 from datetime import datetime, timedelta
 import json
@@ -13,33 +14,40 @@ CATEGORIES_FILE = os.path.join(os.path.dirname(__file__), "categories.json")
 
 mcp = FastMCP("ExpenseTracker")
 
-
-async def load_categories() -> Dict:
-    """Load categories and subcategories from JSON file asynchronously."""
+def load_categories() -> Dict:
+    """Load categories and subcategories from JSON file synchronously."""
     try:
-        async with aiofiles.open(CATEGORIES_FILE, 'r', encoding='utf-8') as f:
-            content = await f.read()
-            return json.loads(content)
+        with open(CATEGORIES_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get("categories", {})
     except FileNotFoundError:
         # Create default categories file if it doesn't exist
-        default_categories = {
+        default_data = {
             "categories": {
                 "Food & Dining": {"subcategories": ["Groceries", "Restaurants", "Takeout", "Coffee"]},
                 "Transportation": {"subcategories": ["Fuel", "Public Transport", "Taxi"]},
+                "Housing": {"subcategories": ["Rent", "Mortgage", "Utilities"]},
+                "Shopping": {"subcategories": ["Clothing", "Electronics"]},
+                "Gifts & Donations": {"subcategories": ["Gifts", "Donations"]},
+                "Healthcare": {"subcategories": ["Medical", "Pharmacy", "Gym"]},
+                "Entertainment": {"subcategories": ["Movies", "Streaming", "Games"]},
+                "Bills & Utilities": {"subcategories": ["Phone", "Cable", "Internet"]},
+                "Insurance": {"subcategories": ["Premiums"]},
+                "Income": {"subcategories": ["Salary", "Bonus", "Refund"]},
                 "Other": {"subcategories": ["Miscellaneous"]}
             }
         }
-        async with aiofiles.open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps(default_categories, indent=2))
-        return default_categories
+        with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(default_data, f, indent=2)
+        return default_data["categories"]
     except Exception as e:
         print(f"Error loading categories: {e}")
-        return {"categories": {}}
+        return {}
 
-
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+def init_db():
+    """Initialize the database synchronously."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS expenses(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
@@ -50,17 +58,14 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        await db.commit()
+        conn.commit()
 
-
-# Initialize database asynchronously
-asyncio.create_task(init_db())
-
+# Initialize database and categories synchronously
+init_db()
 
 class CategoryManager:
     def __init__(self):
-        self.categories_data = asyncio.create_task(load_categories())
-        self.categories = asyncio.run(asyncio.create_task(self.categories_data))  # Wait for load
+        self.categories = load_categories()
         self._build_category_mappings()
 
     def _build_category_mappings(self):
@@ -68,7 +73,6 @@ class CategoryManager:
         self.category_names = list(self.categories.keys())
         self.subcategory_mapping = {}
         self.keyword_mappings = self._build_keyword_mappings()
-
         for category, data in self.categories.items():
             subcategories = data.get("subcategories", [])
             for subcat in subcategories:
@@ -83,7 +87,6 @@ class CategoryManager:
             "coffee|tea|starbucks|costa|espresso|latte": "Food & Dining",
             "takeout|delivery|doordash|ubereats|grubhub": "Food & Dining",
             "alcohol|beer|wine|liquor|bar|pub|brewery": "Food & Dining",
-
             # Transportation
             "fuel|gas|petrol|diesel|gas station": "Transportation",
             "bus|train|subway|metro|transit|rail": "Transportation",
@@ -92,7 +95,6 @@ class CategoryManager:
             "toll|highway|road fee": "Transportation",
             "car wash|maintenance|repair|mechanic|oil change|tire": "Transportation",
             "flight|airline|airport|plane": "Transportation",
-
             # Housing
             "rent|lease|apartment|house": "Housing",
             "mortgage|loan payment": "Housing",
@@ -101,37 +103,31 @@ class CategoryManager:
             "internet|wifi|broadband": "Housing",
             "gas|heating|propane": "Housing",
             "trash|garbage|waste": "Housing",
-
             # Shopping
             "clothing|shoes|apparel|fashion": "Shopping",
             "electronics|computer|laptop|phone|tablet": "Shopping",
             "amazon|ebay|walmart|target|online shopping": "Shopping",
             "gift|present|donation": "Gifts & Donations",
-
             # Healthcare
             "doctor|hospital|clinic|medical": "Healthcare",
             "pharmacy|drugstore|medicine|prescription": "Healthcare",
             "dentist|dental|teeth": "Healthcare",
             "optometrist|glasses|contact lens": "Healthcare",
             "gym|fitness|yoga|exercise": "Healthcare",
-
             # Entertainment
             "movie|cinema|theater": "Entertainment",
             "netflix|spotify|hulu|disney|streaming": "Entertainment",
             "concert|show|performance": "Entertainment",
             "game|gaming|playstation|xbox|nintendo": "Entertainment",
-
             # Bills
             "phone|mobile|cellular|verizon|at&t": "Bills & Utilities",
             "cable|tv|television": "Bills & Utilities",
             "insurance|premium": "Insurance",
-
             # Income
             "salary|paycheck|income|wage": "Income",
             "bonus|commission": "Income",
             "refund|rebate": "Income",
         }
-
         keyword_to_category = {}
         for pattern, category in mappings.items():
             keywords = pattern.split("|")
@@ -157,26 +153,19 @@ class CategoryManager:
             return True
         return subcategory in self.get_subcategories(category)
 
-    def auto_detect_category(self, note: str, amount: float) -> Tuple[str, str]:
+    def auto_detect_category(self, note: str) -> Tuple[str, str]:
         """Auto-detect category and subcategory based on note content."""
         note_lower = note.lower()
-
         # Check for exact subcategory matches first
-        for subcat, category in self.subcategory_mapping.items():
-            if subcat in note_lower:
-                return category, subcat.capitalize()
-
+        for subcat_lower, category in self.subcategory_mapping.items():
+            if subcat_lower in note_lower:
+                return category, subcat_lower.capitalize()
         # Check keyword mappings
         for keyword, category in self.keyword_mappings.items():
             if keyword in note_lower:
                 subcategories = self.get_subcategories(category)
-                if subcategories:
-                    return category, subcategories[0]  # Return first subcategory as default
-
-        # Amount-based detection for income
-        if amount < 0:  # Negative amount typically indicates income
-            return "Income", "Salary"
-
+                sub = subcategories[0] if subcategories else ""
+                return category, sub
         # Default fallback
         return "Other", "Miscellaneous"
 
@@ -184,24 +173,19 @@ class CategoryManager:
         """Suggest possible categories and subcategories based on note."""
         suggestions = []
         note_lower = note.lower()
-
         for category, data in self.categories.items():
             subcategories = data.get("subcategories", [])
             for subcat in subcategories:
                 if subcat.lower() in note_lower:
                     suggestions.append((category, subcat))
-
         # If no direct matches, use keyword detection
         if not suggestions:
-            detected_category, detected_subcategory = self.auto_detect_category(note, 0)
+            detected_category, detected_subcategory = self.auto_detect_category(note)
             suggestions.append((detected_category, detected_subcategory))
-
         return suggestions[:3]  # Return top 3 suggestions
-
 
 # Initialize category manager
 category_manager = CategoryManager()
-
 
 @mcp.tool()
 async def add_expense(date: str, amount: float, category: str = "", subcategory: str = "", note: str = ""):
@@ -209,10 +193,9 @@ async def add_expense(date: str, amount: float, category: str = "", subcategory:
     try:
         # Auto-detect category if not provided
         if not category:
-            category, detected_subcategory = category_manager.auto_detect_category(note, amount)
+            category, detected_subcategory = category_manager.auto_detect_category(note)
             if not subcategory:
                 subcategory = detected_subcategory
-
         # Validate category
         if not category_manager.validate_category(category):
             suggestions = category_manager.suggest_categories(note)
@@ -222,7 +205,6 @@ async def add_expense(date: str, amount: float, category: str = "", subcategory:
                 'message': f"Invalid category '{category}'. Did you mean: {suggestion_text}?",
                 'suggestions': suggestions
             }
-
         # Validate subcategory
         if subcategory and not category_manager.validate_subcategory(category, subcategory):
             valid_subcategories = category_manager.get_subcategories(category)
@@ -231,7 +213,6 @@ async def add_expense(date: str, amount: float, category: str = "", subcategory:
                 'message': f"Invalid subcategory '{subcategory}' for category '{category}'. Valid subcategories: {', '.join(valid_subcategories)}",
                 'valid_subcategories': valid_subcategories
             }
-
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "INSERT INTO expenses(date, amount, category, subcategory, note) VALUES (?,?,?,?,?)",
@@ -250,7 +231,6 @@ async def add_expense(date: str, amount: float, category: str = "", subcategory:
     except Exception as e:
         return {'status': "error", "message": f"Failed to add expense: {str(e)}"}
 
-
 @mcp.tool()
 async def suggest_categories(note: str):
     '''Suggest possible categories and subcategories based on the note.'''
@@ -262,7 +242,6 @@ async def suggest_categories(note: str):
         }
     except Exception as e:
         return {'status': 'error', 'message': f'Failed to suggest categories: {str(e)}'}
-
 
 @mcp.tool()
 async def get_categories():
@@ -278,7 +257,6 @@ async def get_categories():
     except Exception as e:
         return {'status': 'error', 'message': f'Failed to get categories: {str(e)}'}
 
-
 @mcp.tool()
 async def list_expenses(limit: int = 100, offset: int = 0):
     '''List all expenses with pagination.'''
@@ -292,14 +270,13 @@ async def list_expenses(limit: int = 100, offset: int = 0):
             expenses = [dict(zip(cols, row)) for row in rows]
             return expenses
 
-
 @mcp.tool()
 async def update_expense(expense_id: int, date: str = None, amount: float = None, category: str = None, subcategory: str = None, note: str = None):
     '''Update an existing expense entry.'''
     try:
         updates = []
         params = []
-
+        current_category_for_sub = None
         if date is not None:
             updates.append("date = ?")
             params.append(date)
@@ -312,38 +289,32 @@ async def update_expense(expense_id: int, date: str = None, amount: float = None
                 return {'status': "error", "message": f"Invalid category '{category}'"}
             updates.append("category = ?")
             params.append(category)
+            current_category_for_sub = category
         if subcategory is not None:
-            # Validate subcategory against category
-            current_category = category
-            if current_category is None:
+            # Determine category for validation
+            if current_category_for_sub is None:
                 # Get current category from database
                 async with aiosqlite.connect(DB_PATH) as db:
                     async with db.execute("SELECT category FROM expenses WHERE id = ?", (expense_id,)) as cursor:
                         result = await cursor.fetchone()
                         if result:
-                            current_category = result[0]
-
-            if current_category and not category_manager.validate_subcategory(current_category, subcategory):
-                return {'status': "error", "message": f"Invalid subcategory '{subcategory}' for category '{current_category}'"}
-
+                            current_category_for_sub = result[0]
+            if current_category_for_sub and not category_manager.validate_subcategory(current_category_for_sub, subcategory):
+                return {'status': "error", "message": f"Invalid subcategory '{subcategory}' for category '{current_category_for_sub}'"}
             updates.append("subcategory = ?")
             params.append(subcategory)
         if note is not None:
             updates.append("note = ?")
             params.append(note)
-
         if not updates:
             return {'status': "error", "message": "No fields to update"}
-
         params.append(expense_id)
-
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 f"UPDATE expenses SET {', '.join(updates)} WHERE id = ?",
                 params
             )
             await db.commit()
-
             # Check if update affected any rows
             async with db.execute("SELECT changes()") as cursor:
                 changes = (await cursor.fetchone())[0]
@@ -351,10 +322,8 @@ async def update_expense(expense_id: int, date: str = None, amount: float = None
                     return {'status': "success", "message": "Expense updated successfully"}
                 else:
                     return {'status': "error", "message": "Expense not found"}
-
     except Exception as e:
         return {'status': "error", "message": f"Failed to update expense: {str(e)}"}
-
 
 @mcp.tool()
 async def delete_expense(expense_id: int):
@@ -363,7 +332,6 @@ async def delete_expense(expense_id: int):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
             await db.commit()
-
             # Check if deletion affected any rows
             async with db.execute("SELECT changes()") as cursor:
                 changes = (await cursor.fetchone())[0]
@@ -371,10 +339,8 @@ async def delete_expense(expense_id: int):
                     return {'status': "success", "message": "Expense deleted successfully"}
                 else:
                     return {'status': "error", "message": "Expense not found"}
-
     except Exception as e:
         return {'status': "error", "message": f"Failed to delete expense: {str(e)}"}
-
 
 @mcp.tool()
 async def get_expense_by_id(expense_id: int):
@@ -386,19 +352,16 @@ async def get_expense_by_id(expense_id: int):
         ) as cursor:
             cols = [description[0] for description in cursor.description]
             row = await cursor.fetchone()
-
             if row:
                 return dict(zip(cols, row))
             else:
                 return {'status': "error", "message": "Expense not found"}
-
 
 @mcp.tool()
 async def get_expenses_by_category(category: str):
     '''Get all expenses for a specific category.'''
     if not category_manager.validate_category(category):
         return {'status': "error", "message": f"Invalid category '{category}'"}
-
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT id, date, amount, category, subcategory, note, created_at FROM expenses WHERE category = ? ORDER BY date DESC",
@@ -408,7 +371,6 @@ async def get_expenses_by_category(category: str):
             rows = await cursor.fetchall()
             expenses = [dict(zip(cols, row)) for row in rows]
             return expenses
-
 
 @mcp.tool()
 async def get_expenses_by_date_range(start_date: str, end_date: str):
@@ -422,7 +384,6 @@ async def get_expenses_by_date_range(start_date: str, end_date: str):
             rows = await cursor.fetchall()
             expenses = [dict(zip(cols, row)) for row in rows]
             return expenses
-
 
 @mcp.tool()
 async def get_expense_summary(period: str = "month"):
@@ -457,22 +418,19 @@ async def get_expense_summary(period: str = "month"):
             """
         else:
             return {'status': "error", "message": "Invalid period. Use 'month', 'week', or 'year'"}
-
         async with db.execute(query) as cursor:
             cols = [description[0] for description in cursor.description]
             rows = await cursor.fetchall()
             summary = [dict(zip(cols, row)) for row in rows]
             return summary
 
-
 @mcp.tool()
 async def get_total_spending():
-    '''Get total spending across all expenses.'''
+    '''Get total spending across all expenses (excluding Income).'''
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT SUM(amount) as total_spent FROM expenses") as cursor:
+        async with db.execute("SELECT SUM(CASE WHEN category != 'Income' THEN amount ELSE 0 END) as total_spent FROM expenses") as cursor:
             row = await cursor.fetchone()
             return {'total_spent': row[0] if row[0] is not None else 0}
-
 
 @mcp.tool()
 async def search_expenses(query: str):
@@ -487,7 +445,6 @@ async def search_expenses(query: str):
             expenses = [dict(zip(cols, row)) for row in rows]
             return expenses
 
-
 @mcp.tool()
 async def get_recent_expenses(days: int = 7):
     '''Get expenses from the last N days.'''
@@ -495,13 +452,11 @@ async def get_recent_expenses(days: int = 7):
     start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
     return await get_expenses_by_date_range(start_date, end_date)
 
-
 @mcp.tool()
 async def export_expenses(format_type: str = 'json'):
     '''Export all expenses in specified format (currently only JSON).'''
     try:
-        expenses = await list_expenses(limit=10000)  # Large limit to get all expenses
-
+        expenses = await list_expenses(limit=10000) # Large limit to get all expenses
         if format_type.lower() == 'json':
             return {
                 'status': 'success',
@@ -512,10 +467,8 @@ async def export_expenses(format_type: str = 'json'):
             }
         else:
             return {'status': 'error', 'message': 'Unsupported format. Use "json"'}
-
     except Exception as e:
         return {'status': 'error', 'message': f'Export failed: {str(e)}'}
-
 
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)
