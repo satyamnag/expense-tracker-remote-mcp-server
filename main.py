@@ -8,6 +8,12 @@ import re
 from typing import Dict, List, Tuple, Optional
 import asyncio
 import aiofiles
+import atexit
+import sys
+
+from posthog import Posthog
+from posthog.mcp import instrument
+from posthog.mcp.types import MCPAnalyticsOptions
 
 # Use absolute paths for production
 DB_PATH = "/data/expenses.db"  # Persistent storage in production
@@ -514,3 +520,101 @@ async def export_expenses(format_type: str = 'json'):
 
 # Remove the __main__ block for production deployment
 # FastMCP Cloud will handle the server startup
+
+# ---------------------------------------------------------------------------
+# PostHog MCP analytics
+# ---------------------------------------------------------------------------
+# Sends $mcp_* events - tool calls, failures, and which clients/versions call
+# them - so actual tool usage can be seen instead of guessed at.
+#
+# Opt-in by environment. With no POSTHOG_PROJECT_TOKEN this module imports and
+# serves exactly as before: no client is created and the server is not wrapped.
+#
+# Two deviations from the SDK defaults, both because this server holds personal
+# finance data:
+#
+#   * before_send strips $mcp_parameters, $mcp_response and $mcp_error_message.
+#     Those carry each call's arguments and results - here that means amounts,
+#     descriptions, dates and categories, i.e. somebody's spending. Tool names,
+#     durations, error *types*, and client/version adoption still arrive, which
+#     is what the analytics is for.
+#   * context=False stops the SDK adding a `context` argument to every tool.
+#     That argument exists to collect the calling agent's free-text reasoning,
+#     which on a finance server is one more route for spending detail to leave
+#     the process.
+#
+# Anonymous agent sessions are sent with $process_person_profile=false by the
+# SDK, so no person profiles are created for them.
+POSTHOG_PROJECT_TOKEN = os.environ.get("POSTHOG_PROJECT_TOKEN", "").strip()
+POSTHOG_HOST = os.environ.get("POSTHOG_HOST", "https://us.i.posthog.com").strip()
+
+# Removed from every MCP analytics event before it is sent.
+_EXPENSE_BEARING_PROPERTIES = (
+    "$mcp_parameters",
+    "$mcp_response",
+    "$mcp_error_message",
+)
+
+
+def _strip_expense_bearing_properties(event):
+    """before_send hook: drop the fields that can carry a user's expenses.
+
+    Runs after the SDK's own sanitisation and truncation, so what happens here is
+    final. Applied to every event type, including the $exception sibling of a
+    failed tool call, because one tool result can surface in more than one event.
+    """
+    properties = event.get("properties")
+    if properties:
+        for key in _EXPENSE_BEARING_PROPERTIES:
+            properties.pop(key, None)
+    return event
+
+
+def _start_mcp_analytics(server, token: str, host: str):
+    """Attach PostHog MCP analytics to the FastMCP server."""
+    client = Posthog(token, host=host)
+    analytics = instrument(
+        server,
+        client,
+        MCPAnalyticsOptions(
+            context=False,
+            before_send=_strip_expense_bearing_properties,
+        ),
+    )
+
+    # FastMCP Cloud owns the process lifecycle (see the note above), so there is
+    # no run()/uvicorn call here to wrap. The client sends in batches; this is
+    # the last chance to get the tail out when the process exits normally. If the
+    # platform kills the process instead, queued events are lost - the SDK
+    # documents that, and it is why the client's own periodic flush does the real
+    # work.
+    def _flush_and_stop():
+        try:
+            client.shutdown()
+        except Exception:
+            # Nothing useful to do while exiting, and a traceback here would only
+            # add noise to the platform's logs.
+            pass
+
+    atexit.register(_flush_and_stop)
+    return analytics
+
+
+def _instrument_or_serve(server, token: str, host: str):
+    """Wire analytics up, but never let it take the expense server down.
+
+    An analytics integration that fails to initialise must cost telemetry, not
+    the product.
+    """
+    if not token:
+        return None
+    try:
+        return _start_mcp_analytics(server, token, host)
+    except Exception as exc:  # noqa: BLE001 - deliberate: serve regardless
+        # stderr, never stdout: on a stdio transport anything written to stdout
+        # corrupts the MCP protocol stream.
+        print(f"[posthog] MCP analytics disabled: {exc}", file=sys.stderr)
+        return None
+
+
+mcp_analytics = _instrument_or_serve(mcp, POSTHOG_PROJECT_TOKEN, POSTHOG_HOST)
